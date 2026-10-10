@@ -260,10 +260,7 @@ Because the lock itself works without it, the LCD was dropped from version 2 rat
 - Asking the user to confirm a new PIN prevents a typo from permanently locking them out.
 - A common-cathode RGB LED driven by three digital pins produces exactly seven colours, and those colours can carry an entire user interface when no display is available.
 - Arduino automatically writes function prototypes and places them near the top of the sketch, above your own declarations. A function that takes a custom `enum` type as a parameter therefore fails to compile in Tinkercad. Using plain `byte` constants avoids this.
-- The `String` class is convenient but allocates memory repeatedly on a chip with 2 KB of RAM. Fixed character arrays with `strcmp` and `strcpy` are the safer choice.
-- Wrapping text in `F("...")` keeps it in program memory instead of RAM.
-- Confirming a component's I2C address before writing any code would have saved a great deal of time. Copying an address from a tutorial is a guess, not a fact.
-- Shipping a working subset is better than delaying a release for a feature that will not cooperate.
+
 
 ---
 
