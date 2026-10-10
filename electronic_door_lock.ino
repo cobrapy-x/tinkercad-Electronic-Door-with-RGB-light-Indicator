@@ -1,5 +1,18 @@
 /*
   Electronic Door Lock with RGB Indicator
+  Version 2
+
+  New in version 2:
+    The user can change the PIN from the keypad by pressing A.
+    The RGB LED now uses all seven of its colours to show which
+    question the system is asking.
+
+  The PIN starts as 1234 every time the simulation starts. A changed PIN
+  lasts until the simulation is stopped. Saving a PIN permanently needs
+  the EEPROM and is planned for version 3.
+
+  The 16x2 I2C LCD was attempted again in this version and dropped. See
+  the README for what was tried.
 
   Pin connections:
   D2  -> Keypad Row 1
@@ -19,7 +32,23 @@
   Servo GND   -> Arduino GND
   RGB common cathode -> Arduino GND
 
-  Demonstration PIN: 1234
+  Keys:
+  0 to 9  Enter a digit
+  #       Submit
+  *       Clear the digits typed so far
+  A       Start changing the PIN
+  B       Cancel and return to the locked state
+
+  Colours:
+  Blue     Locked, waiting for a PIN
+  Green    Access granted, door open
+  Red      Refused, or an entry was rejected
+  Magenta  Change PIN, step 1, asking for the current PIN
+  Cyan     Change PIN, step 2, asking for the new PIN
+  Yellow   Change PIN, step 3, asking for the new PIN again
+  White    The PIN was changed
+
+  Default PIN: 1234
 */
 
 #include <Keypad.h>
@@ -45,25 +74,21 @@ const int GREEN_PIN = 12;
 const int BLUE_PIN = 13;
 
 
-// ----- Circuit values -----
-
-// Each RGB LED channel uses a 220 ohm current-limiting resistor.
-const int RGB_RESISTOR_OHMS = 220;
-
-
 // ----- Settings -----
 
 const int LOCKED_POSITION = 0;
 const int UNLOCKED_POSITION = 90;
 
-const unsigned long UNLOCK_TIME_MS = 5000;
-const unsigned long DENIED_TIME_MS = 2000;
+const unsigned long UNLOCK_TIME_MS = 5000;     // how long the door stays open
+const unsigned long MESSAGE_TIME_MS = 2000;    // how long a result colour is held
+const unsigned long CHANGE_TIMEOUT_MS = 15000; // an abandoned PIN change gives up
 
-// This PIN is hard-coded because this is a demonstration project.
-const String CORRECT_PIN = "1234";
+// A new PIN must be between these lengths.
+const byte MIN_PIN_LENGTH = 4;
+const byte MAX_PIN_LENGTH = 8;
 
-// Prevent an excessively long input from being stored.
-const byte MAX_PIN_LENGTH = 10;
+// The PIN the system always starts with.
+const char DEFAULT_PIN[] = "1234";
 
 
 // ----- Keypad configuration -----
@@ -71,7 +96,6 @@ const byte MAX_PIN_LENGTH = 10;
 const byte ROWS = 4;
 const byte COLS = 4;
 
-// This map represents the labels printed on the 4x4 keypad.
 char keys[ROWS][COLS] = {
   {'1', '2', '3', 'A'},
   {'4', '5', '6', 'B'},
@@ -79,202 +103,369 @@ char keys[ROWS][COLS] = {
   {'*', '0', '#', 'D'}
 };
 
-byte rowPins[ROWS] = {
-  ROW_1_PIN,
-  ROW_2_PIN,
-  ROW_3_PIN,
-  ROW_4_PIN
-};
+byte rowPins[ROWS] = { ROW_1_PIN, ROW_2_PIN, ROW_3_PIN, ROW_4_PIN };
+byte colPins[COLS] = { COL_1_PIN, COL_2_PIN, COL_3_PIN, COL_4_PIN };
 
-byte colPins[COLS] = {
-  COL_1_PIN,
-  COL_2_PIN,
-  COL_3_PIN,
-  COL_4_PIN
-};
-
-Keypad keypad = Keypad(
-  makeKeymap(keys),
-  rowPins,
-  colPins,
-  ROWS,
-  COLS
-);
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
 
-// ----- Objects and variables -----
+// ----- Objects -----
 
 Servo doorServo;
 
-// Stores the digits entered by the user.
-String enteredPIN = "";
+
+// ----- System states -----
+
+/*
+  Version 1 could only do one thing: collect digits and compare them.
+  Version 2 has to ask for the old PIN, then a new PIN, then the new PIN
+  again, so the sketch needs to remember which question it is asking.
+
+  These are plain numbers rather than an enum on purpose. Arduino writes
+  function prototypes for you and pastes them near the top of the sketch,
+  above anything declared here, so a function that takes a custom type as
+  an argument fails to compile in Tinkercad. Using byte avoids that.
+*/
+const byte STATE_LOCKED = 0;          // waiting for a PIN
+const byte STATE_UNLOCKED = 1;        // servo open, counting down to relock
+const byte STATE_MESSAGE = 2;         // holding a result colour for a moment
+const byte STATE_CHANGE_OLD = 3;      // asking for the current PIN
+const byte STATE_CHANGE_NEW = 4;      // asking for the new PIN
+const byte STATE_CHANGE_CONFIRM = 5;  // asking for the new PIN a second time
+
+byte state = STATE_LOCKED;
+
+// Where to go once the current result colour has been shown long enough.
+byte stateAfterMessage = STATE_LOCKED;
 
 
-// Sets the common-cathode RGB LED to red, green, or blue values.
-void setRGB(int red, int green, int blue) {
-  /*
-    The project only uses values of 0 and 255.
+// ----- Variables -----
 
-    D12 and D13 are not PWM pins on the Arduino Uno, but analogWrite()
-    still works for these two extreme values as simple LOW/HIGH outputs.
-  */
-  analogWrite(RED_PIN, red);
-  analogWrite(GREEN_PIN, green);
-  analogWrite(BLUE_PIN, blue);
+// The PIN that currently opens the door.
+char currentPIN[MAX_PIN_LENGTH + 1];
+
+// The digits typed so far.
+char entry[MAX_PIN_LENGTH + 1];
+byte entryLength = 0;
+
+// The new PIN, held between the "new PIN" and "repeat it" questions.
+char newPIN[MAX_PIN_LENGTH + 1];
+
+// Used for the unlock timer and the result colour timer.
+unsigned long stateTimer = 0;
+
+// Used to abandon a half finished PIN change.
+unsigned long lastKeyTime = 0;
+
+
+// ----- Colours -----
+
+/*
+  The LED is common cathode, so each channel lights when its pin is HIGH.
+
+  D12 and D13 are not PWM pins, so each channel is simply on or off. That
+  gives seven colours: the three channels alone, three pairs, and all
+  three together. Version 2 uses all seven.
+*/
+void setRGB(byte red, byte green, byte blue) {
+  digitalWrite(RED_PIN, red);
+  digitalWrite(GREEN_PIN, green);
+  digitalWrite(BLUE_PIN, blue);
+}
+
+void colourBlue()    { setRGB(LOW,  LOW,  HIGH); }  // locked
+void colourGreen()   { setRGB(LOW,  HIGH, LOW ); }  // granted
+void colourRed()     { setRGB(HIGH, LOW,  LOW ); }  // refused
+void colourMagenta() { setRGB(HIGH, LOW,  HIGH); }  // change step 1
+void colourCyan()    { setRGB(LOW,  HIGH, HIGH); }  // change step 2
+void colourYellow()  { setRGB(HIGH, HIGH, LOW ); }  // change step 3
+void colourWhite()   { setRGB(HIGH, HIGH, HIGH); }  // PIN changed
+
+
+// ----- Small helpers -----
+
+// Forgets the digits typed so far.
+void clearEntry() {
+  entryLength = 0;
+  entry[0] = '\0';
 }
 
 
-// Shows the normal locked state using the blue LED.
-void showLockedState() {
-  setRGB(0, 0, 255);
+// ----- Entering each state -----
+
+void enterLockedState() {
+  clearEntry();
+  colourBlue();
+  state = STATE_LOCKED;
+
+  Serial.println(F("Blue: locked. Enter PIN, then #."));
 }
 
 
-// Grants access, unlocks the servo, waits, and then locks it again.
-void grantAccess() {
-  Serial.println("ACCESS GRANTED");
-
-  // Green indicates that the entered PIN was correct.
-  setRGB(0, 255, 0);
-
-  // Rotate the servo by 90 degrees to represent unlocking the door.
+void enterUnlockedState() {
+  clearEntry();
+  colourGreen();
   doorServo.write(UNLOCKED_POSITION);
 
-  Serial.println("Door unlocked");
+  stateTimer = millis();
+  state = STATE_UNLOCKED;
 
-  // Keep the simulated door unlocked for five seconds.
-  delay(UNLOCK_TIME_MS);
-
-  // Return the servo to its original locked position.
-  doorServo.write(LOCKED_POSITION);
-
-  // Blue indicates that the system is locked and ready again.
-  showLockedState();
-
-  Serial.println("Door locked");
+  Serial.println(F("ACCESS GRANTED"));
+  Serial.println(F("Green: door unlocked."));
 }
 
 
-// Denies access and displays the red status for two seconds.
-void denyAccess() {
-  Serial.println("ACCESS DENIED");
+void enterChangeOldState() {
+  clearEntry();
+  colourMagenta();
+  state = STATE_CHANGE_OLD;
 
-  // Red indicates that the entered PIN was incorrect.
-  setRGB(255, 0, 0);
-
-  // Keep the warning visible long enough to be noticed.
-  delay(DENIED_TIME_MS);
-
-  // Return to the normal locked state.
-  showLockedState();
+  Serial.println(F("Magenta: changing PIN."));
+  Serial.println(F("Step 1 of 3, enter the current PIN."));
 }
 
 
-// Compares the entered PIN with the demonstration PIN.
-void checkPIN() {
-  if (enteredPIN == CORRECT_PIN) {
-    grantAccess();
-  } else {
-    denyAccess();
+void enterChangeNewState() {
+  clearEntry();
+  colourCyan();
+  state = STATE_CHANGE_NEW;
+
+  Serial.println(F("Cyan: step 2 of 3, enter a new PIN."));
+  Serial.println(F("4 to 8 digits, then #."));
+}
+
+
+void enterChangeConfirmState() {
+  clearEntry();
+  colourYellow();
+  state = STATE_CHANGE_CONFIRM;
+
+  Serial.println(F("Yellow: step 3 of 3, enter the new PIN again."));
+}
+
+
+// Sends the system to one of the states above.
+void applyState(byte target) {
+  switch (target) {
+    case STATE_CHANGE_OLD:     enterChangeOldState();     break;
+    case STATE_CHANGE_NEW:     enterChangeNewState();     break;
+    case STATE_CHANGE_CONFIRM: enterChangeConfirmState(); break;
+    default:                   enterLockedState();        break;
+  }
+}
+
+
+/*
+  Holds a result colour for a moment, then moves on by itself.
+
+  Version 1 used delay() here, which froze the whole sketch for two or
+  five seconds at a time. Nothing is frozen now: the colour simply
+  expires in updateTimers(), which is what lets a three step PIN change
+  work at all.
+*/
+void showResult(byte red, byte green, byte blue, byte nextState) {
+  setRGB(red, green, blue);
+  stateAfterMessage = nextState;
+  stateTimer = millis();
+  state = STATE_MESSAGE;
+}
+
+
+// ----- Handling a key press -----
+
+void handleDigit(char key) {
+  if (entryLength >= MAX_PIN_LENGTH) {
+    return;  // the buffer is full, ignore further digits
   }
 
-  // Forget the previous attempt before accepting another PIN.
-  enteredPIN = "";
+  entry[entryLength] = key;
+  entryLength++;
+  entry[entryLength] = '\0';
 
-  Serial.println("Ready for next PIN.");
+  // The digit itself is never printed, only a mask.
+  Serial.print('*');
 }
 
 
-// Clears the PIN currently being entered.
-void clearPIN() {
-  enteredPIN = "";
+void handleSubmitLocked() {
+  if (entryLength == 0) {
+    return;  // pressing # on its own should do nothing
+  }
 
-  // The system remains locked and returns to its normal blue state.
-  showLockedState();
+  Serial.println();
 
-  Serial.println("PIN entry cleared.");
+  if (strcmp(entry, currentPIN) == 0) {
+    enterUnlockedState();
+  } else {
+    Serial.println(F("ACCESS DENIED"));
+    Serial.println(F("Red: wrong PIN."));
+    showResult(HIGH, LOW, LOW, STATE_LOCKED);
+  }
 }
 
+
+void handleSubmitChangeOld() {
+  if (entryLength == 0) {
+    return;
+  }
+
+  Serial.println();
+
+  if (strcmp(entry, currentPIN) == 0) {
+    enterChangeNewState();
+  } else {
+    Serial.println(F("Red: wrong PIN, change refused."));
+    showResult(HIGH, LOW, LOW, STATE_LOCKED);
+  }
+}
+
+
+void handleSubmitChangeNew() {
+  Serial.println();
+
+  if (entryLength < MIN_PIN_LENGTH) {
+    Serial.println(F("Red: too short, use 4 to 8 digits."));
+    showResult(HIGH, LOW, LOW, STATE_CHANGE_NEW);
+    return;
+  }
+
+  // Remember this attempt so it can be compared with the repeat.
+  strcpy(newPIN, entry);
+  enterChangeConfirmState();
+}
+
+
+void handleSubmitChangeConfirm() {
+  Serial.println();
+
+  if (strcmp(entry, newPIN) == 0) {
+    strcpy(currentPIN, newPIN);
+    Serial.println(F("White: PIN changed."));
+    showResult(HIGH, HIGH, HIGH, STATE_LOCKED);
+  } else {
+    Serial.println(F("Red: the two entries did not match."));
+    showResult(HIGH, LOW, LOW, STATE_CHANGE_NEW);
+  }
+}
+
+
+void handleKey(char key) {
+  // While the door is open or a result colour is showing, keys are ignored.
+  if (state == STATE_UNLOCKED || state == STATE_MESSAGE) {
+    return;
+  }
+
+  // B always cancels and returns to the locked state.
+  if (key == 'B') {
+    Serial.println(F("Cancelled."));
+    enterLockedState();
+    return;
+  }
+
+  // A starts a PIN change, but only from the normal locked state.
+  if (key == 'A') {
+    if (state == STATE_LOCKED) {
+      enterChangeOldState();
+    }
+    return;
+  }
+
+  // C and D are not used in this version.
+  if (key == 'C' || key == 'D') {
+    return;
+  }
+
+  // * clears the digits typed so far without leaving the current question.
+  if (key == '*') {
+    clearEntry();
+    Serial.println(F("Entry cleared."));
+    return;
+  }
+
+  if (key == '#') {
+    switch (state) {
+      case STATE_LOCKED:         handleSubmitLocked();        break;
+      case STATE_CHANGE_OLD:     handleSubmitChangeOld();     break;
+      case STATE_CHANGE_NEW:     handleSubmitChangeNew();     break;
+      case STATE_CHANGE_CONFIRM: handleSubmitChangeConfirm(); break;
+      default: break;
+    }
+    return;
+  }
+
+  if (key >= '0' && key <= '9') {
+    handleDigit(key);
+  }
+}
+
+
+// ----- Things that happen on their own -----
+
+void updateTimers() {
+  unsigned long now = millis();
+
+  if (state == STATE_UNLOCKED) {
+    if (now - stateTimer >= UNLOCK_TIME_MS) {
+      doorServo.write(LOCKED_POSITION);
+      Serial.println(F("Door locked"));
+      enterLockedState();
+    }
+    return;
+  }
+
+  if (state == STATE_MESSAGE) {
+    if (now - stateTimer >= MESSAGE_TIME_MS) {
+      applyState(stateAfterMessage);
+    }
+    return;
+  }
+
+  // A PIN change left half finished should not stay open forever.
+  if (state == STATE_CHANGE_OLD ||
+      state == STATE_CHANGE_NEW ||
+      state == STATE_CHANGE_CONFIRM) {
+
+    if (now - lastKeyTime >= CHANGE_TIMEOUT_MS) {
+      Serial.println(F("PIN change timed out. PIN unchanged."));
+      showResult(HIGH, LOW, LOW, STATE_LOCKED);
+    }
+  }
+}
+
+
+// ----- Setup and main loop -----
 
 void setup() {
-  // Configure the three RGB LED channels as outputs.
   pinMode(RED_PIN, OUTPUT);
   pinMode(GREEN_PIN, OUTPUT);
   pinMode(BLUE_PIN, OUTPUT);
 
-  // Connect the Servo library to the servo signal pin.
   doorServo.attach(SERVO_PIN);
-
-  // Start with the physical lock in its locked position.
   doorServo.write(LOCKED_POSITION);
 
-  // Blue is the startup indication for locked and ready.
-  showLockedState();
-
-  // Start serial communication for debugging and observing system events.
   Serial.begin(9600);
 
-  Serial.println("Electronic Door Lock");
-  Serial.println("System started.");
-  Serial.println("Blue = locked and waiting.");
-  Serial.println("Enter PIN, press # to submit, or * to clear.");
+  // The system always starts on the default PIN.
+  strcpy(currentPIN, DEFAULT_PIN);
+
+  lastKeyTime = millis();
+
+  Serial.println(F("Electronic Door Lock v2"));
+  Serial.println(F("# submits, * clears."));
+  Serial.println(F("A changes the PIN, B cancels."));
+
+  enterLockedState();
 }
 
 
 void loop() {
-
-  // ----- 1) Read keypad -----
-
-  // getKey() returns a character when a key has been pressed.
   char key = keypad.getKey();
 
-  // If no key was pressed, there is nothing else to process this cycle.
-  if (!key) {
-    return;
+  if (key) {
+    lastKeyTime = millis();
+    handleKey(key);
   }
 
-
-  // ----- 2) Process control keys -----
-
-  // The * key clears all digits entered so far.
-  if (key == '*') {
-    clearPIN();
-    return;
-  }
-
-  // The # key submits the current PIN.
-  if (key == '#') {
-    Serial.println("PIN submitted.");
-    checkPIN();
-    return;
-  }
-
-
-  // ----- 3) Store numeric input -----
-
-  // Only number keys are accepted as part of the PIN.
-  if (key >= '0' && key <= '9') {
-
-    // Stop accepting digits when the maximum input length is reached.
-    if (enteredPIN.length() < MAX_PIN_LENGTH) {
-      enteredPIN += key;
-
-      /*
-        Do not print the actual entered digit.
-        Printing * demonstrates how a real system can hide PIN input.
-      */
-      Serial.print("*");
-    }
-  }
-
-
-  // ----- 4) Serial Monitor -----
-
-  /*
-    Access results are printed by grantAccess(), denyAccess(),
-    checkPIN(), and clearPIN().
-
-    The entered PIN itself is intentionally not sent to the
-    Serial Monitor because PINs should not normally be exposed.
-  */
+  // Runs every pass, so nothing waits on a delay().
+  updateTimers();
 }
