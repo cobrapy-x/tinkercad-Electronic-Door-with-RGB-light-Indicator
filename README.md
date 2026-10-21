@@ -259,7 +259,6 @@ Because the lock itself works without it, the LCD was dropped from version 2 rat
 - `delay()` stops everything, including reading the keypad. Timing with `millis()` instead lets the program keep responding while it waits, which is what made the PIN-change feature possible.
 - Asking the user to confirm a new PIN prevents a typo from permanently locking them out.
 - A common-cathode RGB LED driven by three digital pins produces exactly seven colours, and those colours can carry an entire user interface when no display is available.
-- Arduino automatically writes function prototypes and places them near the top of the sketch, above your own declarations. A function that takes a custom `enum` type as a parameter therefore fails to compile in Tinkercad. Using plain `byte` constants avoids this.
 
 
 ---
@@ -269,7 +268,6 @@ Because the lock itself works without it, the LCD was dropped from version 2 rat
 - Resolve the `invalid header file` error and finally get the 16x2 I2C LCD working.
 - Display masked characters such as `****` while the PIN is being entered.
 - Display `Access Granted`, `Access Denied`, and the PIN-change prompts on the LCD.
-- Store the PIN in EEPROM so a changed PIN survives a restart.
 - Add a maximum number of incorrect attempts followed by a temporary lockout.
 - Store a hash of the PIN rather than the PIN itself.
 - Add a buzzer for audible feedback.
