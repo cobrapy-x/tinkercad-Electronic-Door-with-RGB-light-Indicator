@@ -6,7 +6,7 @@ An RGB LED provides all status feedback. Seven different colours tell the user w
 
 **Version 2** adds a user-changeable PIN. The owner can set a new PIN from the keypad without editing the program. The default PIN is still `1234`.
 
-🔗 **Tinkercad simulation:** [open the circuit](https://www.tinkercad.com/things/943wKnsWRWk-electronic-door-with-rgb-light-indicator)
+🔗 **Tinkercad simulation:** [open the circuit](https://www.tinkercad.com/things/i7V48scyurK-electronic-door-with-rgb-light-indicator-version3)
 
 ![Circuit in Tinkercad](Electronic_Door_Lock.png)
 
