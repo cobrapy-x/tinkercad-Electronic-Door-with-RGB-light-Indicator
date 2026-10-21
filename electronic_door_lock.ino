@@ -8,8 +8,7 @@
     question the system is asking.
 
   The PIN starts as 1234 every time the simulation starts. A changed PIN
-  lasts until the simulation is stopped. Saving a PIN permanently needs
-  the EEPROM and is planned for version 3.
+  lasts until the simulation is stopped. 
 
   The 16x2 I2C LCD was attempted again in this version and dropped. See
   the README for what was tried.
