@@ -298,11 +298,6 @@ The address check rejects frames from other remotes, but an attacker who knows t
 
 A real wireless lock addresses this with rolling codes, where transmitter and receiver advance through a shared pseudo-random sequence so a captured code is never valid twice. That is beyond the scope of this project, but it is the correct answer to the problem.
 
-### Timer conflict
-
-The IRremote library claims Timer2 on an Uno, which disables PWM output on D3 and D11. D11 is the red channel of the RGB LED.
-
-This costs nothing here, because all three channels are driven with `digitalWrite`. It does mean `analogWrite` colour mixing is no longer possible on this board without moving the LED or using a microcontroller with more timers. Combining IR, a servo on Timer1, and three PWM colour channels does not fit on an Uno.
 
 ### Other limitations
 
