@@ -48,19 +48,6 @@ When the entered PIN is correct, the RGB LED turns green and the servo rotates f
 
 The PIN starts as `1234` every time the simulation starts.
 
-### Filtering repeated presses
-
-NEC marks a held button with a repeat flag, but a held button also sends one genuine frame before the repeats begin, and a slightly long press often sends a second genuine frame. The repeat flag alone is therefore not enough, so the same command arriving twice in quick succession is rejected as well.
-
-```cpp
-if (!isRepeat && fromOurRemote) {
-    bool tooSoon = (command == lastCommand) &&
-                   (now - lastCommandTime < IR_DEBOUNCE_MS);
-    ...
-}
-```
-
-Both filters are needed. Without them an entry of `1234` easily becomes `11223344` and the lock never opens. The debounce window is 250 ms.
 
 ### Changing the PIN
 
